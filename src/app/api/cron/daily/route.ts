@@ -9,9 +9,9 @@ export async function GET() {
     type Row = { steam_id: string };
 
     const steamIds = await withClient(async (c) => {
-      const u = await c.query<Row>("SELECT steam_id FROM users");
-      // 👇 add the annotation here
-      return u.rows.map((r: Row) => r.steam_id);
+      const u = await c.query("SELECT steam_id FROM users");
+      const rows = (u.rows as unknown as Row[]);
+      return rows.map((r) => r.steam_id);
     });
 
     const results: Array<{ steamId: string; ok: boolean; total?: number; error?: string }> = [];
