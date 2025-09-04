@@ -10,43 +10,49 @@ export async function GET(req: Request) {
 
   try {
     const result = await withClient(async (c) => {
+      type IdRow = { id: number };
       type ItemRow = {
         name: string;
-        qty: number | string; // pg can return numeric as string
+        qty: number | string;
         valued_price_usd_effective: number | string | null;
       };
 
-      const u = await c.query<{ id: number }>("SELECT id FROM users WHERE steam_id=$1", [steamId]);
-      if (!u.rowCount) return { gainers: [], losers: [] };
+      const u = await c.query("SELECT id FROM users WHERE steam_id=$1", [steamId]);
+      const userRows = (u.rows as unknown as IdRow[]);
+      if (!userRows.length) return { gainers: [], losers: [] };
 
-      const uid = u.rows[0].id;
-      const snaps = await c.query<{ id: number }>(
+      const uid = userRows[0].id;
+
+      const snapsRes = await c.query(
         "SELECT id FROM inventory_snapshots WHERE user_id=$1 ORDER BY taken_at DESC LIMIT 2",
         [uid]
       );
-      if (snaps.rowCount < 2) return { gainers: [], losers: [] };
+      const snapRows = (snapsRes.rows as unknown as IdRow[]);
+      if (snapRows.length < 2) return { gainers: [], losers: [] };
 
-      const [sidNow, sidPrev] = [snaps.rows[0].id, snaps.rows[1].id];
+      const [sidNow, sidPrev] = [snapRows[0].id, snapRows[1].id];
 
-      const now = await c.query<ItemRow>(
+      const nowRes = await c.query(
         "SELECT name, qty, valued_price_usd_effective FROM item_snapshots WHERE snapshot_id=$1",
         [sidNow]
       );
-      const prev = await c.query<ItemRow>(
+      const prevRes = await c.query(
         "SELECT name, qty, valued_price_usd_effective FROM item_snapshots WHERE snapshot_id=$1",
         [sidPrev]
       );
 
-      // Build a typed previous-value map (value in USD)
+      const prevRows = (prevRes.rows as unknown as ItemRow[]);
+      const nowRows = (nowRes.rows as unknown as ItemRow[]);
+
       const mapPrev = new Map<string, number>();
-      for (const r of prev.rows) {
+      for (const r of prevRows) {
         const qty = Number(r.qty);
         const val = Number(r.valued_price_usd_effective ?? 0);
         mapPrev.set(r.name, qty * val);
       }
 
       const deltas: { name: string; usd: number; pct: number }[] = [];
-      for (const r of now.rows) {
+      for (const r of nowRows) {
         const curQty = Number(r.qty);
         const curPU = Number(r.valued_price_usd_effective ?? 0);
         const cur = curQty * curPU;
