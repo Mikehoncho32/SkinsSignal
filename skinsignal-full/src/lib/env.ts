@@ -1,0 +1,1 @@
+export function getEnv(){const{DATABASE_URL,CSFLOAT_API_KEY,NEXT_PUBLIC_SITE_URL}=process.env; if(!DATABASE_URL) throw new Error("Missing DATABASE_URL"); return {DATABASE_URL,CSFLOAT_API_KEY,NEXT_PUBLIC_SITE_URL};}
