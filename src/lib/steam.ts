@@ -9,39 +9,89 @@ export function normalizeSteamId(raw: string): string {
   return s;
 }
 
-/**
- * Fetches public Steam inventory for CS2 (app 730).
- * Throws a detailed error that includes HTTP status and (if present) a short body snippet.
- */
-export async function fetchSteamInventory(steamIdRaw: string) {
-  const steamId = normalizeSteamId(steamIdRaw);
+type SteamAssetsPayload = { assets: any[]; descriptions: any[] };
 
+/** Primary modern endpoint */
+async function fetchPrimary(steamId: string): Promise<Response> {
   const url = `https://steamcommunity.com/inventory/${steamId}/730/2?l=en&count=5000`;
-  const res = await fetch(url, { cache: "no-store" });
-
-  if (!res.ok) {
-    let body = "";
-    try {
-      body = await res.text();
-      // Trim very long HTML error pages down to something readable
-      if (body.length > 500) body = body.slice(0, 500) + "…";
-    } catch {
-      // ignore
-    }
-    const msg = `steam_fetch_failed: ${res.status}${
-      body ? ` body=${JSON.stringify(body)}` : ""
-    }`;
-    throw new Error(msg);
-  }
-
-  const json = await res.json().catch(() => null);
-  if (!json || !Array.isArray(json.assets) || !Array.isArray(json.descriptions)) {
-    throw new Error("steam_invalid_payload: missing assets/descriptions");
-  }
-  return json;
+  return fetch(url, { cache: "no-store" });
 }
 
-// Aggregate CS2 items by market_hash_name/name
+/** Legacy JSON endpoint (different shape) */
+async function fetchLegacy(steamId: string): Promise<Response> {
+  const url = `https://steamcommunity.com/profiles/${steamId}/inventory/json/730/2`;
+  return fetch(url, { cache: "no-store" });
+}
+
+/** Convert legacy shape into { assets, descriptions } like the primary endpoint */
+function normalizeLegacy(json: any): SteamAssetsPayload {
+  // Legacy format has { success: true, rgInventory, rgDescriptions }
+  const inv = json?.rgInventory || {};
+  const desc = json?.rgDescriptions || {};
+
+  // Build arrays
+  const assets: any[] = Object.values(inv).map((a: any) => ({
+    appid: 730,
+    classid: String(a.classid),
+    instanceid: String(a.instanceid || "0"),
+    amount: String(a.amount || "1"),
+  }));
+
+  const descriptions: any[] = Object.values(desc).map((d: any) => ({
+    appid: 730,
+    classid: String(d.classid),
+    instanceid: String(d.instanceid || "0"),
+    market_hash_name: d.market_hash_name || d.name,
+    name: d.name,
+  }));
+
+  return { assets, descriptions };
+}
+
+/**
+ * Fetch public Steam inventory for CS2.
+ * Tries primary endpoint; on 400/403/429/5xx it retries once, then falls back to legacy endpoint.
+ */
+export async function fetchSteamInventory(steamIdRaw: string): Promise<SteamAssetsPayload> {
+  const steamId = normalizeSteamId(steamIdRaw);
+
+  // Try primary with a light retry
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetchPrimary(steamId);
+    if (res.ok) {
+      const j = await res.json().catch(() => null);
+      if (j && Array.isArray(j.assets) && Array.isArray(j.descriptions)) {
+        return j;
+      }
+      throw new Error("steam_invalid_payload: missing assets/descriptions");
+    }
+    // Retry on transient / Steam quirks
+    if (![400, 401, 403, 404].includes(res.status)) {
+      await new Promise(r => setTimeout(r, 800));
+      continue;
+    }
+    // If we got a hard status like 400/403, break to try legacy
+    break;
+  }
+
+  // Fallback to legacy
+  const legacyRes = await fetchLegacy(steamId);
+  if (!legacyRes.ok) {
+    const body = await legacyRes.text().catch(() => "");
+    throw new Error(`steam_fetch_failed: ${legacyRes.status}${body ? " body=" + JSON.stringify(body.slice(0,500)) : ""}`);
+  }
+  const legacyJson = await legacyRes.json().catch(() => null);
+  if (!legacyJson || legacyJson.success !== true) {
+    throw new Error("steam_legacy_failed: unexpected payload");
+  }
+  const normalized = normalizeLegacy(legacyJson);
+  if (!Array.isArray(normalized.assets) || !Array.isArray(normalized.descriptions)) {
+    throw new Error("steam_legacy_invalid_payload");
+  }
+  return normalized;
+}
+
+// Aggregate items by market_hash_name/name
 export type ItemAggregate = { name: string; qty: number };
 
 export function aggregateInventory(raw: any): ItemAggregate[] {
